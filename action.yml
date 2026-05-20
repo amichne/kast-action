@@ -1,5 +1,5 @@
 name: "Setup Kast"
-description: "Install the Kast CLI and headless backend for CI, Devin sessions, and Copilot agents"
+description: "Install the Kast CLI and headless backend for CI and headless agent sessions"
 author: "amichne"
 
 inputs:
@@ -7,6 +7,18 @@ inputs:
     description: "Kast version to install (e.g., v1.2.3). Defaults to latest release."
     required: false
     default: "latest"
+  platform:
+    description: "Kast headless bundle platform identifier"
+    required: false
+    default: "linux-x64"
+  bundle-url:
+    description: "Exact headless bundle URL to download instead of resolving a GitHub.com release asset"
+    required: false
+    default: ""
+  bundle-sha256:
+    description: "Expected SHA-256 for bundle-url or the resolved public bundle"
+    required: false
+    default: ""
   install-root:
     description: "Installation root directory. Defaults to $HOME/.kast-agent"
     required: false

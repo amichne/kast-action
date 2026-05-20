@@ -1,16 +1,19 @@
 import * as core from "@actions/core";
 import { installKast } from "./installer";
-import { resolveVersion } from "./version";
+import { resolveActionVersion } from "./version";
 
 async function run(): Promise<void> {
   try {
     const versionInput = core.getInput("version") || "latest";
+    const platformInput = core.getInput("platform") || "linux-x64";
+    const bundleUrlInput = core.getInput("bundle-url");
+    const bundleSha256Input = core.getInput("bundle-sha256");
     const token = core.getInput("token");
     const installRootInput = core.getInput("install-root");
     const workspaceInput = core.getInput("workspace");
     const skipCopilotExtension = core.getInput("skip-copilot-extension").toLowerCase() === "true";
 
-    const version = await resolveVersion(versionInput, token);
+    const version = await resolveActionVersion(versionInput, token, bundleUrlInput);
     core.info(`Resolved Kast version: ${version}`);
 
     const result = await installKast({
@@ -19,6 +22,9 @@ async function run(): Promise<void> {
       installRoot: installRootInput || "",
       workspace: workspaceInput || "",
       skipCopilotExtension,
+      platform: platformInput,
+      bundleUrl: bundleUrlInput,
+      bundleSha256: bundleSha256Input,
     });
 
     core.setOutput("version", version);

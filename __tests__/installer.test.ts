@@ -1,3 +1,4 @@
+import * as crypto from "crypto";
 import * as path from "path";
 import {
   InstallerDependencies,
@@ -11,7 +12,12 @@ describe("installer", () => {
   it("uses a cached bundle and marks action installs in the installer environment", async () => {
     const execCalls: Array<{ tool: string; args: string[]; env?: Record<string, string> }> = [];
     const deps = fakeDependencies({
-      findTool: () => "/cache/kast",
+      findTool: (toolName, version, arch) => {
+        expect(toolName).toBe("kast-headless-agent");
+        expect(version).toBe("1.2.3");
+        expect(arch).toBe("linux-x64");
+        return "/cache/kast";
+      },
       existsSync: (target) => [
         "/cache/kast/install.sh",
         "/workspace/.git",
@@ -71,7 +77,83 @@ describe("installer", () => {
       },
     });
 
-    await expect(downloadAndCache("v1.2.3", "gh-token", deps)).resolves.toBe("/cache/kast");
+    await expect(downloadAndCache({
+      version: "v1.2.3",
+      token: "gh-token",
+      platform: "linux-x64",
+    }, deps)).resolves.toBe("/cache/kast");
+  });
+
+  it("downloads an explicit mirrored bundle, verifies sha256, and uses a sha-qualified cache key", async () => {
+    const bundleBytes = Buffer.from("mirrored kast bundle");
+    const bundleSha256 = crypto.createHash("sha256").update(bundleBytes).digest("hex");
+    const mirrorUrl = "https://github.aexp.com/org/kast-mirror/releases/download/v1.2.3/kast-headless-agent-v1.2.3-linux-x64.zip";
+
+    const deps = fakeDependencies({
+      downloadTool: async (url, _dest, auth) => {
+        expect(url).toBe(mirrorUrl);
+        expect(auth).toBe("token ghes-token");
+        return "/tmp/mirror.zip";
+      },
+      readFileSync: (target) => {
+        expect(target).toBe("/tmp/mirror.zip");
+        return bundleBytes;
+      },
+      extractZip: async (archivePath) => {
+        expect(archivePath).toBe("/tmp/mirror.zip");
+        return "/tmp/extracted";
+      },
+      cacheDir: async (sourceDir, toolName, version, arch) => {
+        expect(sourceDir).toBe("/tmp/extracted");
+        expect(toolName).toBe("kast-headless-agent");
+        expect(version).toBe("1.2.3");
+        expect(arch).toBe(`linux-x64-${bundleSha256}`);
+        return "/cache/kast";
+      },
+      env: {
+        GITHUB_SERVER_URL: "https://github.aexp.com",
+      },
+    });
+
+    await expect(downloadAndCache({
+      version: "v1.2.3",
+      token: "ghes-token",
+      platform: "linux-x64",
+      bundleUrl: mirrorUrl,
+      bundleSha256,
+    }, deps)).resolves.toBe("/cache/kast");
+  });
+
+  it("rejects checksum failures before extraction and cache writes", async () => {
+    const bundleSha256 = crypto.createHash("sha256").update("expected").digest("hex");
+    const extractZip = jest.fn();
+    const cacheDir = jest.fn();
+
+    const deps = fakeDependencies({
+      readFileSync: () => Buffer.from("actual"),
+      extractZip,
+      cacheDir,
+    });
+
+    await expect(downloadAndCache({
+      version: "v1.2.3",
+      token: "",
+      platform: "linux-x64",
+      bundleUrl: "https://github.aexp.com/org/kast-mirror/releases/download/v1.2.3/kast-headless-agent-v1.2.3-linux-x64.zip",
+      bundleSha256,
+    }, deps)).rejects.toThrow("Checksum mismatch");
+
+    expect(extractZip).not.toHaveBeenCalled();
+    expect(cacheDir).not.toHaveBeenCalled();
+  });
+
+  it("requires bundle-sha256 when bundle-url is set", async () => {
+    await expect(downloadAndCache({
+      version: "v1.2.3",
+      token: "",
+      platform: "linux-x64",
+      bundleUrl: "https://github.aexp.com/org/kast-mirror/releases/download/v1.2.3/kast-headless-agent-v1.2.3-linux-x64.zip",
+    }, fakeDependencies())).rejects.toThrow("bundle-sha256 is required");
   });
 
   it("normalizes versions and user paths", () => {
@@ -92,6 +174,7 @@ function fakeDependencies(
     exec: async () => 0,
     mkdirP: async () => undefined,
     existsSync: () => true,
+    readFileSync: () => Buffer.from("bundle"),
     homedir: () => "/home/runner",
     cwd: () => "/workspace",
     env: {
