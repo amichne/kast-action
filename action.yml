@@ -1,0 +1,41 @@
+name: "Setup Kast"
+description: "Install the Kast CLI and headless backend for CI, Devin sessions, and Copilot agents"
+author: "amichne"
+
+inputs:
+  version:
+    description: "Kast version to install (e.g., v1.2.3). Defaults to latest release."
+    required: false
+    default: "latest"
+  install-root:
+    description: "Installation root directory. Defaults to $HOME/.kast-agent"
+    required: false
+    default: ""
+  workspace:
+    description: "Git workspace for Copilot extension install. Defaults to $GITHUB_WORKSPACE or $PWD."
+    required: false
+    default: ""
+  token:
+    description: "GitHub token for authenticated release downloads (avoids rate limits)"
+    required: false
+    default: "${{ github.token }}"
+  skip-copilot-extension:
+    description: "Set KAST_SKIP_COPILOT_EXTENSION=true to skip Copilot extension install"
+    required: false
+    default: "false"
+
+outputs:
+  version:
+    description: "The resolved Kast version that was installed"
+  install-root:
+    description: "The Kast installation root path"
+  kast-bin:
+    description: "Absolute path to the kast binary"
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
+
+branding:
+  icon: "terminal"
+  color: "purple"

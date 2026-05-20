@@ -34,12 +34,15 @@ bower_components
 # node-waf configuration
 .lock-wscript
 
-# Compiled binary addons (https://nodejs.org/api/addons.html)
+# Compiled binary addons (https://nodejs.org/api/addons)
 build/Release
 
 # Dependency directories
 node_modules/
 jspm_packages/
+
+# Build output
+lib/
 
 # Snowpack dependency directory (https://snowpack.dev/)
 web_modules/
@@ -80,7 +83,6 @@ out
 
 # Nuxt.js build / generate output
 .nuxt
-dist
 .output
 
 # Gatsby files
