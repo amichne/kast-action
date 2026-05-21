@@ -46,7 +46,7 @@ runner without that token.
 
 ## Why Node.js?
 
-This is a Node.js action (`runs.using: node20`), not a composite or Docker action.
+This is a Node.js action (`runs.using: node24`), not a composite or Docker action.
 Node.js actions work in GHA-compatible environments where Docker and composite
 actions are unavailable.
 
@@ -67,7 +67,7 @@ actions are unavailable.
 
 | Output | Description |
 |--------|-------------|
-| `version` | Resolved Kast version |
+| `version` | Kast version reported by the installed `kast` binary |
 | `install-root` | Installation root path |
 | `kast-bin` | Absolute path to kast binary |
 

@@ -38,14 +38,14 @@ inputs:
 
 outputs:
   version:
-    description: "The resolved Kast version that was installed"
+    description: "The Kast version reported by the installed kast binary"
   install-root:
     description: "The Kast installation root path"
   kast-bin:
     description: "Absolute path to the kast binary"
 
 runs:
-  using: "node20"
+  using: "node24"
   main: "dist/index.js"
 
 branding:
