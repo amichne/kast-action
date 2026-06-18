@@ -1,51 +1,65 @@
 name: "Setup Kast"
-description: "Install the Kast CLI and headless backend for CI and headless agent sessions"
+description: "Install a prebuilt Kast headless runtime and optional Gradle dependency cache"
 author: "amichne"
 
 inputs:
   version:
-    description: "Kast version to install (e.g., v1.2.3). Defaults to latest release."
+    description: "Kast semver version to install. Must be a path-safe version segment such as 1.2.3 or v1.2.3."
+    required: true
+  artifact-url:
+    description: "URL or file URL for kast-headless-linux-x64.tar.zst."
+    required: true
+  artifact-sha256:
+    description: "Expected SHA-256 digest for the runtime artifact."
+    required: true
+  manifest-url:
+    description: "URL or file URL for kast-runtime-manifest.json. Required unless the runtime artifact already contains the manifest."
     required: false
-    default: "latest"
-  platform:
-    description: "Kast headless bundle platform identifier"
+  authorization-header:
+    description: "Optional HTTP Authorization header applied to all HTTP artifact downloads."
     required: false
-    default: "linux-x64"
-  bundle-url:
-    description: "Exact headless bundle URL to download instead of resolving a GitHub.com release asset"
+  artifact-authorization-header:
+    description: "Optional HTTP Authorization header for the runtime artifact download. Overrides authorization-header."
     required: false
-    default: ""
-  bundle-sha256:
-    description: "Expected SHA-256 for bundle-url or the resolved public bundle"
+  manifest-authorization-header:
+    description: "Optional HTTP Authorization header for the runtime manifest download. Overrides authorization-header."
     required: false
-    default: ""
-  install-root:
-    description: "Installation root directory. Defaults to $HOME/.kast-agent"
+  install-dir:
+    description: "Root directory for managed Kast installs."
     required: false
-    default: ""
-  workspace:
-    description: "Git workspace for Copilot extension install. Defaults to $GITHUB_WORKSPACE or $PWD."
+    default: /opt/kast
+  gradle-ro-cache-url:
+    description: "Optional URL or file URL for gradle-ro-dep-cache.tar.zst."
     required: false
-    default: ""
-  token:
-    description: "GitHub token for authenticated release downloads (avoids rate limits)"
+  gradle-ro-cache-sha256:
+    description: "Optional SHA-256 digest for the Gradle read-only dependency cache artifact."
     required: false
-    default: "${{ github.token }}"
-  skip-copilot-extension:
-    description: "Set KAST_SKIP_COPILOT_EXTENSION=true to skip Copilot extension install"
+  gradle-ro-cache-authorization-header:
+    description: "Optional HTTP Authorization header for the Gradle read-only cache download. Overrides authorization-header."
+    required: false
+  fail-on-cache-miss:
+    description: "Fail when the optional Gradle read-only cache cannot be installed."
     required: false
     default: "false"
-
-outputs:
-  version:
-    description: "The Kast version reported by the installed kast binary"
-  install-root:
-    description: "The Kast installation root path"
-  kast-bin:
-    description: "Absolute path to the kast binary"
+  strict:
+    description: "Fail when kast doctor exits non-zero."
+    required: false
+    default: "true"
+  download-attempts:
+    description: "Number of attempts for artifact downloads."
+    required: false
+    default: "3"
+  download-retry-delay-ms:
+    description: "Delay between artifact download attempts in milliseconds."
+    required: false
+    default: "1000"
+  download-timeout-ms:
+    description: "Timeout for each HTTP artifact download attempt in milliseconds."
+    required: false
+    default: "120000"
 
 runs:
-  using: "node24"
+  using: "node20"
   main: "dist/index.js"
 
 branding:

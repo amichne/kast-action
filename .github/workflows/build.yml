@@ -11,14 +11,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          node-version: 20
           cache: npm
+
+      - name: Ensure zstd is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends zstd
+          fi
 
       - run: npm ci
       - run: npm run lint
       - run: npm test
+      - run: npm run test:fixtures
       - run: npm run build
 
       - name: Check dist/ is up to date

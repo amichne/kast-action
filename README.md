@@ -1,135 +1,117 @@
 # kast-action
 
-Install Kast CLI and headless backend in GitHub Actions and headless agent sessions.
+Install a prebuilt Kast Linux x64 headless runtime and optional Gradle
+read-only dependency cache in GitHub Actions, Devin blueprints, and mirrored
+ephemeral workspaces.
 
 ## Usage
 
 ```yaml
 steps:
+  - uses: actions/setup-java@v5
+    with:
+      java-version: "21"
+      distribution: "temurin"
+
+  - name: Install artifact decompression tools
+    run: |
+      if ! command -v zstd >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends zstd
+      fi
+
   - uses: amichne/kast-action@v1
     with:
-      version: v1.2.3
+      version: "1.2.3"
+      artifact-url: "$KAST_HEADLESS_URL"
+      artifact-sha256: "$KAST_HEADLESS_SHA256"
+      manifest-url: "$KAST_RUNTIME_MANIFEST_URL"
+      install-dir: /opt/kast
 
-  - run: kast --help
+  - run: kast --version
 ```
 
-## Enterprise and GHES mirrors
+The action writes `KAST_HOME`, `KAST_CACHE_HOME`, and `KAST_CONFIG_HOME` to
+`GITHUB_ENV`, and adds the installed `bin` directory to `GITHUB_PATH`.
 
-For runners without public egress, mirror both this action and the headless
-bundle. Do not rely on `latest` inside enterprise workflows; pin the version
-and checksum.
+## Devin and Marketplace Mirrors
+
+Devin blueprints use the GitHub Action URL form:
 
 ```yaml
-steps:
-  - uses: aexp-mirror/kast-action@v1
+initialize:
+  - name: Install Kast headless runtime
+    uses: github.com/amichne/kast-action@v1
     with:
-      version: v1.2.3
-      bundle-url: https://github.aexp.com/<org>/<repo>/releases/download/v1.2.3/kast-headless-agent-v1.2.3-linux-x64.zip
-      bundle-sha256: <sha256>
-      skip-copilot-extension: true
-
-  - run: kast --help
+      version: "1.2.3"
+      artifact-url: "$KAST_HEADLESS_URL"
+      artifact-sha256: "$KAST_HEADLESS_SHA256"
+      manifest-url: "$KAST_RUNTIME_MANIFEST_URL"
+      gradle-ro-cache-url: "$KAST_GRADLE_RO_CACHE_URL"
+      gradle-ro-cache-sha256: "$KAST_GRADLE_RO_CACHE_SHA256"
+      fail-on-cache-miss: "true"
+      install-dir: /opt/kast
 ```
 
-When `bundle-url` is set, the action:
+For mirrored environments, mirror both this action repository and the release
+artifacts consumed by the action:
 
-- Downloads that exact URL.
-- Requires and verifies `bundle-sha256` before extraction or cache writes.
-- Requires `version` to be pinned.
-- Skips GitHub.com release lookup and public asset URL construction.
-- Uses a tool-cache key that includes `kast-headless-agent`, version, platform,
-  and the checksum.
+- `kast-headless-linux-x64.tar.zst`
+- `kast-runtime-manifest.json`
+- `gradle-ro-dep-cache.tar.zst`, when using the optional Gradle cache
 
-The `token` input is attached to an explicit `bundle-url` only when the URL
-origin matches `$GITHUB_SERVER_URL`. Other mirror URLs must be reachable by the
-runner without that token.
-
-## Why Node.js?
-
-This is a Node.js action (`runs.using: node24`), not a composite or Docker action.
-Node.js actions work in GHA-compatible environments where Docker and composite
-actions are unavailable.
+Pin the action mirror to a tag or commit and keep runtime artifact checksums
+strict. The action never prints full HTTP artifact URLs, so signed URL query
+parameters stay out of failure logs.
 
 ## Inputs
 
-| Input | Default | Description |
-|-------|---------|-------------|
-| `version` | `latest` | Kast release tag to install |
-| `platform` | `linux-x64` | Headless bundle platform identifier |
-| `bundle-url` | unset | Exact mirrored bundle URL; bypasses GitHub.com release lookup |
-| `bundle-sha256` | unset | Expected SHA-256 for the downloaded bundle |
-| `install-root` | `$HOME/.kast-agent` | Installation root directory |
-| `workspace` | `$GITHUB_WORKSPACE` | Git workspace for Copilot extension |
-| `token` | `${{ github.token }}` | GitHub token for release downloads |
-| `skip-copilot-extension` | `false` | Skip Copilot extension install |
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `version` | yes | | Kast semver path segment, such as `1.2.3` or `v1.2.3` |
+| `artifact-url` | yes | | `file://`, absolute path, HTTP, or HTTPS URL for `kast-headless-linux-x64.tar.zst` |
+| `artifact-sha256` | yes | | SHA-256 digest for the runtime archive |
+| `manifest-url` | no | | Sidecar `kast-runtime-manifest.json`; omit only when the archive already contains the manifest |
+| `authorization-header` | no | | Default HTTP `Authorization` header for all downloads |
+| `artifact-authorization-header` | no | | Runtime archive header override |
+| `manifest-authorization-header` | no | | Manifest header override |
+| `install-dir` | no | `/opt/kast` | Managed install root |
+| `gradle-ro-cache-url` | no | | URL for `gradle-ro-dep-cache.tar.zst` |
+| `gradle-ro-cache-sha256` | no | | SHA-256 digest for the Gradle cache archive |
+| `gradle-ro-cache-authorization-header` | no | | Gradle cache header override |
+| `fail-on-cache-miss` | no | `false` | Fail when the optional Gradle cache cannot be installed |
+| `strict` | no | `true` | Fail when `kast doctor` exits non-zero |
+| `download-attempts` | no | `3` | Download retry count, range `1..10` |
+| `download-retry-delay-ms` | no | `1000` | Delay between download attempts |
+| `download-timeout-ms` | no | `120000` | Per-attempt HTTP timeout |
 
-## Outputs
+## Runtime Contract
 
-| Output | Description |
-|--------|-------------|
-| `version` | Kast version reported by the installed `kast` binary |
-| `install-root` | Installation root path |
-| `kast-bin` | Absolute path to kast binary |
+The runtime archive must contain regular files for:
 
-## Caching
+- `bin/kast`
+- `lib/runtime-libs/classpath.txt`
+- `idea/modules/module-descriptors.dat`
+- an `idea/` directory
 
-Uses `@actions/tool-cache` to cache the downloaded bundle in the runner's tool
-cache (`$RUNNER_TOOL_CACHE`). Public downloads are cached by action tool name,
-version, and platform. Mirrored downloads with `bundle-sha256` are cached by
-action tool name, version, platform, and checksum, so changing the checksum for
-the same version forces a separate cache entry.
+The action rejects unsafe archive paths, symbolic links, unsupported archive
+member types, checksum mismatches, manifest/archive digest mismatches, and
+runtime manifests outside schema version `1`.
 
-## Artifact model
+The optional Gradle cache archive must contain `gradle-ro/modules-2` at the
+archive root. The action rejects lock files, Gradle GC metadata, unsafe archive
+paths, symbolic links, and unsupported archive member types before publishing
+the cache.
 
-Mirror these release assets for headless bootstrap:
-
-| Asset | Purpose |
-|-------|---------|
-| `kast-headless-agent-vX.Y.Z-linux-x64.zip` | Self-contained headless agent bundle consumed by this action |
-| `SHA256SUMS` | Public checksum source used to verify mirrored assets |
-
-Do not substitute `kast-vX.Y.Z-*.zip` assets for the headless bundle. Those are
-developer-machine Homebrew assets and are separate from the headless bootstrap
-artifact consumed by this action.
-
-## Runner requirements
-
-The action and bundle installer expect these tools on the runner:
-
-- `bash`
-- `git`
-- `python3`
-- `curl`
-- Java 21
-
-## Mirror process
-
-The public Kast release publishes the headless bundle and `SHA256SUMS`. Keep the
-internal mirror job outside the public repository and make it perform these
-steps for each pinned version:
+## Development
 
 ```bash
-set -euo pipefail
-
-version="v1.2.3"
-asset="kast-headless-agent-${version}-linux-x64.zip"
-base_url="https://github.com/amichne/kast/releases/download/${version}"
-
-curl -fsSLO "${base_url}/SHA256SUMS"
-curl -fsSLO "${base_url}/${asset}"
-
-sha256sum --check --ignore-missing SHA256SUMS
-
-internal_sha256="$(sha256sum "${asset}" | awk '{print $1}')"
-printf '%s  %s\n' "${internal_sha256}" "${asset}" > SHA256SUMS.internal
-
-# Upload "${asset}" and SHA256SUMS.internal to the internal GHES release.
+npm ci
+npm run lint
+npm test
+npm run test:fixtures
 ```
 
-Enterprise default policy:
-
-- Mirror both `kast-action` and `kast-headless-agent-vX.Y.Z-linux-x64.zip`.
-- Allow no public egress from runners.
-- Require pinned `version` and `bundle-sha256`.
-- Set `skip-copilot-extension: true` unless repository mutation by setup action
-  is approved.
+The fixture test covers successful install, retries, checksum failures, unsafe
+archives, invalid manifests, unsupported platforms, Gradle cache handling,
+strict `kast doctor` rollback, and log redaction for signed artifact URLs.
