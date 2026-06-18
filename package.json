@@ -11,7 +11,7 @@
     "test:fixtures": "scripts/test-setup-kast-action.sh"
   },
   "devDependencies": {
-    "@types/node": "^20.19.0",
+    "@types/node": "^24.0.0",
     "typescript": "^5.9.3"
   }
 }
