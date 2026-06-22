@@ -37,6 +37,52 @@ type RuntimeManifest = {
   artifactSha256: string;
 };
 
+type KastInstallManifest = {
+  tool: "kast";
+  installId: string;
+  profile: "setup-kast-headless";
+  activeVersion: string;
+  previousVersion?: string;
+  createdAt: string;
+  updatedAt: string;
+  roots: {
+    install: string;
+    bin: string;
+    config: string;
+    data: string;
+    cache: string;
+    runtime: string;
+    logs: string;
+    locks: string;
+  };
+  entrypoints: {
+    shim: string;
+    activeBinary: string;
+  };
+  schemas: {
+    manifest: number;
+    workspaceRegistry: number;
+    symbolIndex: number;
+  };
+  version: string;
+  backendVersion: string;
+  installedAt: string;
+  platform: "linux-x64";
+  components: string[];
+  backends: Array<{
+    name: "headless";
+    version: string;
+    installDir: string;
+    runtimeLibsDir: string;
+    ideaHome: string;
+  }>;
+  managedPaths: string[];
+  ownedPaths: string[];
+  shellRcPatches: unknown[];
+  repos: unknown[];
+  schemaVersion: number;
+};
+
 type InstallContext = {
   version: string;
   artifactUrl: string;
@@ -219,24 +265,29 @@ async function installRuntime(context: InstallContext, scratch: string): Promise
   const previousCurrent = await readCurrentSymlink(current);
   const configPath = kastConfigPath(context);
   const previousConfig = await readOptionalTextFile(configPath);
+  const installManifestPath = kastInstallManifestPath(context);
+  const previousInstallManifest = await readOptionalTextFile(installManifestPath);
   let attemptedCurrentPublish = false;
   let cleanupStaging = false;
   try {
     cleanupStaging = true;
     await installTree(preparedRoot, stagingDir);
     await writeKastConfig(context, stagingDir);
+    await writeKastInstallManifest(context, stagingDir, previousInstallManifest);
     await runKastChecks(context, stagingDir);
     await replaceManagedPath(stagingDir, targetDir);
     cleanupStaging = false;
     attemptedCurrentPublish = true;
     await installSymlink(targetDir, current);
     await writeKastConfig(context, current);
+    await writeKastInstallManifest(context, current, previousInstallManifest);
     await exportEnvironment(context, current);
   } catch (error) {
     if (attemptedCurrentPublish) {
       await restoreCurrentSymlink(current, previousCurrent);
     }
     await restoreTextFile(configPath, previousConfig);
+    await restoreTextFile(installManifestPath, previousInstallManifest);
     if (cleanupStaging) {
       await removeManagedPath(stagingDir).catch((cleanupError) => {
         warn(`failed to remove staged runtime ${stagingDir}: ${messageOf(cleanupError)}`);
@@ -573,6 +624,110 @@ function kastConfigPath(context: InstallContext): string {
   return join(context.configHome, "config.toml");
 }
 
+function kastInstallManifestPath(context: InstallContext): string {
+  return join(context.installDir, "install.json");
+}
+
+async function writeKastInstallManifest(
+  context: InstallContext,
+  current: string,
+  previous: OptionalTextFile,
+): Promise<void> {
+  const manifestPath = kastInstallManifestPath(context);
+  await mkdir(dirname(manifestPath), { recursive: true });
+  const now = currentTimestamp();
+  const normalizedVersion = normalizeVersion(context.version);
+  const runtimeLibs = join(current, "lib", "runtime-libs");
+  const ideaHome = join(current, "idea");
+  const activeBinary = join(current, "bin", "kast");
+  const previousVersion = previousActiveVersion(previous, normalizedVersion);
+  const manifest: KastInstallManifest = {
+    tool: "kast",
+    installId: `setup-kast-linux-x64-${normalizedVersion}`,
+    profile: "setup-kast-headless",
+    activeVersion: context.version,
+    ...(previousVersion ? { previousVersion } : {}),
+    createdAt: previousCreatedAt(previous) || now,
+    updatedAt: now,
+    roots: {
+      install: context.installDir,
+      bin: join(current, "bin"),
+      config: context.configHome,
+      data: join(context.installDir, "state"),
+      cache: context.cacheHome,
+      runtime: join(context.installDir, "runtime"),
+      logs: join(context.cacheHome, "logs"),
+      locks: join(context.installDir, "locks"),
+    },
+    entrypoints: {
+      shim: activeBinary,
+      activeBinary,
+    },
+    schemas: {
+      manifest: 1,
+      workspaceRegistry: 1,
+      symbolIndex: 3,
+    },
+    version: normalizedVersion,
+    backendVersion: normalizedVersion,
+    installedAt: `setup-kast:${context.version}`,
+    platform: "linux-x64",
+    components: ["cli", "headless-backend", "config", "manifest"],
+    backends: [
+      {
+        name: "headless",
+        version: normalizedVersion,
+        installDir: current,
+        runtimeLibsDir: runtimeLibs,
+        ideaHome,
+      },
+    ],
+    managedPaths: [],
+    ownedPaths: [
+      context.installDir,
+      current,
+      context.configHome,
+      context.cacheHome,
+    ],
+    shellRcPatches: [],
+    repos: [],
+    schemaVersion: 3,
+  };
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+}
+
+function currentTimestamp(): string {
+  return `unix:${Math.floor(Date.now() / 1000)}`;
+}
+
+function previousActiveVersion(previous: OptionalTextFile, normalizedVersion: string): string | undefined {
+  const payload = previousJson(previous);
+  if (!payload) return undefined;
+  const activeVersion = stringProperty(payload, "activeVersion");
+  if (!activeVersion || normalizeVersion(activeVersion) === normalizedVersion) return undefined;
+  return activeVersion;
+}
+
+function previousCreatedAt(previous: OptionalTextFile): string | undefined {
+  const payload = previousJson(previous);
+  return payload ? stringProperty(payload, "createdAt") : undefined;
+}
+
+function previousJson(previous: OptionalTextFile): Record<string, unknown> | undefined {
+  if (!previous.exists) return undefined;
+  try {
+    const payload: unknown = JSON.parse(previous.content);
+    return isRecord(payload) ? payload : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stringProperty(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 type OptionalTextFile = {
   exists: boolean;
   content: string;
@@ -768,6 +923,7 @@ function tomlString(value: string): string {
 async function exportEnvironment(context: InstallContext, current: string): Promise<void> {
   await mkdir(context.cacheHome, { recursive: true });
   await appendGithubPath(join(current, "bin"));
+  await appendGithubEnv("KAST_INSTALL_ROOT", context.installDir);
   await appendGithubEnv("KAST_HOME", current);
   await appendGithubEnv("KAST_CACHE_HOME", context.cacheHome);
   await appendGithubEnv("KAST_CONFIG_HOME", context.configHome);
@@ -777,6 +933,7 @@ async function runKastChecks(context: InstallContext, current: string): Promise<
   const env = {
     ...process.env,
     PATH: `${join(current, "bin")}:${process.env.PATH || ""}`,
+    KAST_INSTALL_ROOT: context.installDir,
     KAST_HOME: current,
     KAST_CACHE_HOME: context.cacheHome,
     KAST_CONFIG_HOME: context.configHome,

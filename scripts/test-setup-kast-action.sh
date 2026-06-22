@@ -313,12 +313,15 @@ run_action "$success_root" \
 [[ -L "${success_root}/opt/kast/current" ]] || die "current symlink was not created"
 [[ -x "${success_root}/opt/kast/current/bin/kast" ]] || die "installed kast binary is missing"
 [[ -f "${success_root}/opt/kast/current/kast-runtime-manifest.json" ]] || die "installed manifest is missing"
+[[ -f "${success_root}/opt/kast/install.json" ]] || die "install manifest is missing"
 [[ -d "${success_root}/opt/kast/cache/gradle-ro/modules-2" ]] || die "Gradle read-only cache was not installed"
 [[ -f "${success_root}/home/.config/kast/config.toml" ]] || die "Kast config was not written"
 [[ -d "${success_root}/home/.cache/kast" ]] || die "Kast cache home was not created"
 [[ -d "${success_root}/home/.gradle" ]] || die "Writable Gradle user home was not created"
 assert_tree_read_only "${success_root}/opt/kast/cache/gradle-ro"
 require_contains "${success_root}/github-path" "${success_root}/opt/kast/current/bin" "GITHUB_PATH"
+require_contains "${success_root}/github-env" "KAST_INSTALL_ROOT<<" "GITHUB_ENV KAST_INSTALL_ROOT"
+require_contains "${success_root}/github-env" "${success_root}/opt/kast" "GITHUB_ENV KAST_INSTALL_ROOT value"
 require_contains "${success_root}/github-env" "KAST_HOME<<" "GITHUB_ENV KAST_HOME"
 require_contains "${success_root}/github-env" "${success_root}/opt/kast/current" "GITHUB_ENV KAST_HOME value"
 require_contains "${success_root}/github-env" "KAST_CACHE_HOME<<" "GITHUB_ENV KAST_CACHE_HOME"
@@ -328,8 +331,38 @@ require_contains "${success_root}/github-env" "${success_root}/opt/kast/cache/gr
 require_contains "${success_root}/home/.config/kast/config.toml" "defaultBackend = \"headless\"" "setup config"
 require_contains "${success_root}/home/.config/kast/config.toml" "runtimeLibsDir = \"${success_root}/opt/kast/current/lib/runtime-libs\"" "setup config runtime libs"
 require_contains "${success_root}/home/.config/kast/config.toml" "descriptorDir = \"${success_root}/home/.cache/kast/workspaces\"" "setup config descriptor dir"
+python3 - "${success_root}/opt/kast/install.json" "$success_root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+success_root = Path(sys.argv[2])
+install_root = success_root / "opt" / "kast"
+current = install_root / "current"
+assert manifest["tool"] == "kast", manifest
+assert manifest["profile"] == "setup-kast-headless", manifest
+assert manifest["activeVersion"] == "9.8.7", manifest
+assert manifest["roots"]["install"] == str(install_root), manifest
+assert manifest["roots"]["bin"] == str(current / "bin"), manifest
+assert manifest["roots"]["config"] == str(success_root / "home" / ".config" / "kast"), manifest
+assert manifest["roots"]["cache"] == str(success_root / "home" / ".cache" / "kast"), manifest
+assert manifest["entrypoints"]["activeBinary"] == str(current / "bin" / "kast"), manifest
+assert manifest["schemas"]["manifest"] == 1, manifest
+assert manifest["schemas"]["workspaceRegistry"] == 1, manifest
+assert manifest["schemas"]["symbolIndex"] == 3, manifest
+assert manifest["version"] == "9.8.7", manifest
+assert manifest["backendVersion"] == "9.8.7", manifest
+assert "manifest" in manifest["components"], manifest
+assert manifest["schemaVersion"] == 3, manifest
+backend = manifest["backends"][0]
+assert backend["name"] == "headless", manifest
+assert backend["runtimeLibsDir"] == str(current / "lib" / "runtime-libs"), manifest
+assert backend["ideaHome"] == str(current / "idea"), manifest
+PY
 
 PATH="${success_root}/opt/kast/current/bin:${PATH}" \
+KAST_INSTALL_ROOT="${success_root}/opt/kast" \
 KAST_HOME="${success_root}/opt/kast/current" \
 KAST_CACHE_HOME="${success_root}/home/.cache/kast" \
 GRADLE_RO_DEP_CACHE="${success_root}/opt/kast/cache/gradle-ro" \
@@ -360,6 +393,7 @@ esac
 SH
 chmod 755 "${gradle_warm_root}/gradlew"
 PATH="${success_root}/opt/kast/current/bin:${PATH}" \
+KAST_INSTALL_ROOT="${success_root}/opt/kast" \
 KAST_HOME="${success_root}/opt/kast/current" \
 KAST_CACHE_HOME="${success_root}/home/.cache/kast" \
 GRADLE_RO_DEP_CACHE="${success_root}/opt/kast/cache/gradle-ro" \
@@ -376,6 +410,7 @@ stale_path_root="${scratch_dir}/stale-path"
 mkdir -p "${stale_path_root}/bin"
 write_fixture_cli "${stale_path_root}/bin/kast"
 if PATH="${stale_path_root}/bin:${success_root}/opt/kast/current/bin:${PATH}" \
+KAST_INSTALL_ROOT="${success_root}/opt/kast" \
 KAST_HOME="${success_root}/opt/kast/current" \
 KAST_CACHE_HOME="${success_root}/home/.cache/kast" \
 GRADLE_RO_DEP_CACHE="${success_root}/opt/kast/cache/gradle-ro" \
