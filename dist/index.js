@@ -23,7 +23,7 @@ const REQUIRED_MANIFEST_FIELDS = [
     "kastIndexSchemaVersion",
     "artifactSha256",
 ];
-async function main() {
+async function legacyMain() {
     assertLinuxX64();
     await requireExternalTool("tar", "extract .tar.zst runtime and Gradle cache artifacts");
     await requireExternalTool("zstd", "decompress .tar.zst runtime and Gradle cache artifacts");
@@ -36,6 +36,46 @@ async function main() {
     finally {
         await (0, promises_1.rm)(scratch, { recursive: true, force: true });
     }
+}
+async function main() {
+    assertLinuxX64();
+    await requireExternalTool("tar", "extract the Kast setup bundle");
+    const context = readContext();
+    const scratch = await makeScratch();
+    try {
+        const archive = (0, node_path_1.join)(scratch, "kast-setup-bundle.tar.gz");
+        await download(context.artifactUrl, archive, context, {
+            label: "setup bundle",
+            authorizationHeader: context.artifactAuthorizationHeader || context.authorizationHeader,
+        });
+        await verifyChecksum(archive, context.artifactSha256, "setup bundle");
+        const extracted = (0, node_path_1.join)(scratch, "bundle");
+        await (0, promises_1.mkdir)(extracted, { recursive: true });
+        await execFileAsync("tar", ["-xzf", archive, "-C", extracted]);
+        const bundle = await findSetupBundle(extracted);
+        await execFileAsync((0, node_path_1.join)(bundle, "bin", "kast"), ["setup", "--source", bundle], {
+            env: {
+                ...process.env,
+                KAST_HOME: context.installDir,
+                KAST_CACHE_HOME: context.cacheHome,
+                KAST_CONFIG_HOME: context.configHome,
+            },
+        });
+        const current = (0, node_path_1.join)(context.installDir, "current");
+        await exportEnvironment(context, current);
+        await installGradleCache(context, scratch);
+    }
+    finally {
+        await (0, promises_1.rm)(scratch, { recursive: true, force: true });
+    }
+}
+async function findSetupBundle(root) {
+    for (const candidate of [root, ...await findDirectories(root, 2)]) {
+        if (await (0, promises_1.lstat)((0, node_path_1.join)(candidate, "bin", "kast")).then((stat) => stat.isFile()).catch(() => false)
+            && await (0, promises_1.lstat)((0, node_path_1.join)(candidate, "manifest.json")).then((stat) => stat.isFile()).catch(() => false))
+            return candidate;
+    }
+    throw new Error("setup bundle must contain bin/kast and manifest.json");
 }
 function readContext() {
     const home = process.env.HOME && process.env.HOME.trim() ? process.env.HOME : process.cwd();
