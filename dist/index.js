@@ -11,32 +11,6 @@ const node_stream_1 = require("node:stream");
 const promises_2 = require("node:stream/promises");
 const node_util_1 = require("node:util");
 const execFileAsync = (0, node_util_1.promisify)(node_child_process_1.execFile);
-const REQUIRED_MANIFEST_FIELDS = [
-    "schemaVersion",
-    "kastVersion",
-    "kastGitSha",
-    "os",
-    "arch",
-    "javaVersion",
-    "intellijBuild",
-    "kotlinPluginVersion",
-    "kastIndexSchemaVersion",
-    "artifactSha256",
-];
-async function legacyMain() {
-    assertLinuxX64();
-    await requireExternalTool("tar", "extract .tar.zst runtime and Gradle cache artifacts");
-    await requireExternalTool("zstd", "decompress .tar.zst runtime and Gradle cache artifacts");
-    const context = readContext();
-    const scratch = await makeScratch();
-    try {
-        await installRuntime(context, scratch);
-        await installGradleCache(context, scratch);
-    }
-    finally {
-        await (0, promises_1.rm)(scratch, { recursive: true, force: true });
-    }
-}
 async function main() {
     assertLinuxX64();
     await requireExternalTool("tar", "extract the Kast setup bundle");
@@ -185,154 +159,6 @@ async function requireExternalTool(command, purpose) {
         throw new Error(`missing required tool '${command}' needed to ${purpose}; install ${command} before running setup-kast: ${messageOf(error)}`);
     }
 }
-async function installRuntime(context, scratch) {
-    const archive = (0, node_path_1.join)(scratch, "kast-headless-linux-x64.tar.zst");
-    await download(context.artifactUrl, archive, context, {
-        label: "runtime artifact",
-        authorizationHeader: context.artifactAuthorizationHeader || context.authorizationHeader,
-    });
-    const artifactDigest = await verifyChecksum(archive, context.artifactSha256, "runtime artifact");
-    const extractDir = (0, node_path_1.join)(scratch, "runtime-extract");
-    await (0, promises_1.mkdir)(extractDir, { recursive: true });
-    await assertSafeTarArchive(archive);
-    await execFileAsync("tar", ["--zstd", "-xf", archive, "-C", extractDir]);
-    await assertNoSymbolicLinks(extractDir);
-    const runtimeRoot = await findRuntimeRoot(extractDir);
-    const targetDir = (0, node_path_1.join)(context.installDir, context.version);
-    const preparedRoot = (0, node_path_1.join)(scratch, "runtime-prepared");
-    await (0, promises_1.rm)(preparedRoot, { recursive: true, force: true });
-    await (0, promises_1.cp)(runtimeRoot, preparedRoot, { recursive: true, force: true });
-    await (0, promises_1.chmod)((0, node_path_1.join)(preparedRoot, "bin", "kast"), 0o755);
-    const manifest = validateManifest(await resolveManifest(context, scratch, preparedRoot), context.version, artifactDigest);
-    await (0, promises_1.writeFile)((0, node_path_1.join)(preparedRoot, "kast-runtime-manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8");
-    const stagingDir = (0, node_path_1.join)(context.installDir, `.setup-kast-${context.version}-${process.pid}-${Date.now()}`);
-    const current = (0, node_path_1.join)(context.installDir, "current");
-    const previousCurrent = await readCurrentSymlink(current);
-    const configPath = kastConfigPath(context);
-    const previousConfig = await readOptionalTextFile(configPath);
-    const installManifestPath = kastInstallManifestPath(context);
-    const previousInstallManifest = await readOptionalTextFile(installManifestPath);
-    let attemptedCurrentPublish = false;
-    let cleanupStaging = false;
-    try {
-        cleanupStaging = true;
-        await installTree(preparedRoot, stagingDir);
-        await writeKastConfig(context, stagingDir);
-        await writeKastInstallManifest(context, stagingDir, previousInstallManifest);
-        await runKastChecks(context, stagingDir);
-        await replaceManagedPath(stagingDir, targetDir);
-        cleanupStaging = false;
-        attemptedCurrentPublish = true;
-        await installSymlink(targetDir, current);
-        await writeKastConfig(context, current);
-        await writeKastInstallManifest(context, current, previousInstallManifest);
-        await exportEnvironment(context, current);
-    }
-    catch (error) {
-        if (attemptedCurrentPublish) {
-            await restoreCurrentSymlink(current, previousCurrent);
-        }
-        await restoreTextFile(configPath, previousConfig);
-        await restoreTextFile(installManifestPath, previousInstallManifest);
-        if (cleanupStaging) {
-            await removeManagedPath(stagingDir).catch((cleanupError) => {
-                warn(`failed to remove staged runtime ${stagingDir}: ${messageOf(cleanupError)}`);
-            });
-        }
-        throw error;
-    }
-    info(`Kast installed at ${current}`);
-}
-async function resolveManifest(context, scratch, targetDir) {
-    const manifestPath = (0, node_path_1.join)(scratch, "kast-runtime-manifest.json");
-    if (context.manifestUrl) {
-        await download(context.manifestUrl, manifestPath, context, {
-            label: "runtime manifest",
-            authorizationHeader: context.manifestAuthorizationHeader || context.authorizationHeader,
-        });
-    }
-    else {
-        await (0, promises_1.copyFile)((0, node_path_1.join)(targetDir, "kast-runtime-manifest.json"), manifestPath).catch(() => {
-            throw new Error("kast-runtime-manifest.json is required as manifest-url or inside the runtime artifact");
-        });
-    }
-    return JSON.parse(await (0, promises_1.readFile)(manifestPath, "utf8"));
-}
-function validateManifest(manifest, version, artifactDigest) {
-    if (!isRecord(manifest)) {
-        throw new Error("runtime manifest must be a JSON object");
-    }
-    const allowedFields = new Set(REQUIRED_MANIFEST_FIELDS);
-    const unexpected = Object.keys(manifest).filter((key) => !allowedFields.has(key));
-    if (unexpected.length > 0) {
-        throw new Error(`runtime manifest contains unsupported field(s): ${unexpected.join(", ")}`);
-    }
-    for (const key of REQUIRED_MANIFEST_FIELDS) {
-        if (!(key in manifest)) {
-            throw new Error(`runtime manifest is missing ${key}`);
-        }
-    }
-    const schemaVersion = manifest.schemaVersion;
-    if (!Number.isInteger(schemaVersion)) {
-        throw new Error(`runtime manifest schemaVersion must be an integer, got ${String(schemaVersion)}`);
-    }
-    if (schemaVersion !== 1) {
-        throw new Error(`runtime manifest schemaVersion must be 1, got ${schemaVersion}`);
-    }
-    const kastVersion = stringField(manifest, "kastVersion");
-    const kastGitSha = stringField(manifest, "kastGitSha");
-    const os = stringField(manifest, "os");
-    const arch = stringField(manifest, "arch");
-    const javaVersion = stringField(manifest, "javaVersion");
-    const intellijBuild = stringField(manifest, "intellijBuild");
-    const kotlinPluginVersion = stringField(manifest, "kotlinPluginVersion");
-    const kastIndexSchemaVersion = stringField(manifest, "kastIndexSchemaVersion");
-    const artifactSha256 = stringField(manifest, "artifactSha256");
-    if (normalizeVersion(kastVersion) !== normalizeVersion(version)) {
-        throw new Error(`runtime manifest version ${kastVersion} does not match requested ${version}`);
-    }
-    if (!/^[0-9a-f]{7,40}$/.test(kastGitSha)) {
-        throw new Error(`runtime manifest kastGitSha must be 7 to 40 lowercase hexadecimal characters, got ${kastGitSha}`);
-    }
-    if (os !== "linux" || arch !== "x64") {
-        throw new Error(`runtime manifest platform ${os}/${arch} does not match linux/x64`);
-    }
-    if (!/^[0-9]+$/.test(javaVersion)) {
-        throw new Error(`runtime manifest javaVersion must be numeric, got ${javaVersion}`);
-    }
-    if (!/^[0-9]+$/.test(kastIndexSchemaVersion)) {
-        throw new Error(`runtime manifest kastIndexSchemaVersion must be numeric text, got ${kastIndexSchemaVersion}`);
-    }
-    const manifestDigest = normalizeChecksum(artifactSha256);
-    if (manifestDigest !== artifactDigest) {
-        throw new Error(`runtime manifest artifactSha256 does not match artifact digest: expected ${artifactDigest}, got ${manifestDigest}`);
-    }
-    return {
-        schemaVersion,
-        kastVersion,
-        kastGitSha,
-        os,
-        arch,
-        javaVersion,
-        intellijBuild,
-        kotlinPluginVersion,
-        kastIndexSchemaVersion,
-        artifactSha256: manifestDigest,
-    };
-}
-function isRecord(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function stringField(manifest, key) {
-    const value = manifest[key];
-    if (typeof value !== "string" || value.trim() === "") {
-        throw new Error(`runtime manifest ${key} must be a non-empty string`);
-    }
-    return value.trim();
-}
-function normalizeVersion(value) {
-    return value.trim().replace(/^v/, "");
-}
 async function installGradleCache(context, scratch) {
     if (!context.gradleCacheUrl) {
         return;
@@ -374,37 +200,6 @@ async function installGradleCache(context, scratch) {
             throw new Error(message);
         }
         warn(message);
-    }
-}
-async function findRuntimeRoot(root) {
-    const candidates = await findDirectories(root, 3);
-    for (const candidate of [root, ...candidates]) {
-        try {
-            await assertRuntimeRootShape(candidate);
-            return candidate;
-        }
-        catch {
-            // Try the next candidate.
-        }
-    }
-    throw new Error("runtime artifact must contain regular files bin/kast, lib/runtime-libs/classpath.txt, idea/modules/module-descriptors.dat, and an idea/ directory");
-}
-async function assertRuntimeRootShape(candidate) {
-    await assertRegularFile((0, node_path_1.join)(candidate, "bin", "kast"), "runtime bin/kast");
-    await assertRegularFile((0, node_path_1.join)(candidate, "lib", "runtime-libs", "classpath.txt"), "runtime classpath.txt");
-    await assertDirectory((0, node_path_1.join)(candidate, "idea"), "runtime idea directory");
-    await assertRegularFile((0, node_path_1.join)(candidate, "idea", "modules", "module-descriptors.dat"), "runtime module descriptors");
-}
-async function assertRegularFile(path, label) {
-    const stats = await (0, promises_1.lstat)(path);
-    if (!stats.isFile()) {
-        throw new Error(`${label} must be a regular file: ${path}`);
-    }
-}
-async function assertDirectory(path, label) {
-    const stats = await (0, promises_1.lstat)(path);
-    if (!stats.isDirectory()) {
-        throw new Error(`${label} must be a directory: ${path}`);
     }
 }
 async function assertSafeTarArchive(archive) {
@@ -492,200 +287,6 @@ async function findDirectories(root, maxDepth) {
     await visit(root, 1);
     return result;
 }
-async function writeKastConfig(context, current) {
-    const configPath = kastConfigPath(context);
-    const runtimeLibs = (0, node_path_1.join)(current, "lib", "runtime-libs");
-    const ideaHome = (0, node_path_1.join)(current, "idea");
-    const binaryPath = (0, node_path_1.join)(current, "bin", "kast");
-    await (0, promises_1.mkdir)((0, node_path_1.dirname)(configPath), { recursive: true });
-    const content = `[server]
-maxResults = 500
-requestTimeoutMillis = 30000
-maxConcurrentRequests = 4
-
-[paths]
-installRoot = ${tomlString(current)}
-binDir = ${tomlString((0, node_path_1.join)(current, "bin"))}
-libDir = ${tomlString((0, node_path_1.join)(current, "lib"))}
-cacheDir = ${tomlString(context.cacheHome)}
-logsDir = ${tomlString((0, node_path_1.join)(context.cacheHome, "logs"))}
-descriptorDir = ${tomlString((0, node_path_1.join)(context.cacheHome, "workspaces"))}
-socketDir = ${tomlString((0, node_path_1.join)(context.cacheHome, "workspaces"))}
-
-[runtime]
-defaultBackend = "headless"
-
-[backends.headless]
-enabled = true
-runtimeLibsDir = ${tomlString(runtimeLibs)}
-ideaHome = ${tomlString(ideaHome)}
-
-[backends.idea]
-enabled = false
-
-[cli]
-binaryPath = ${tomlString(binaryPath)}
-
-[install]
-version = ${tomlString(normalizeVersion(context.version))}
-backendVersion = ${tomlString(normalizeVersion(context.version))}
-installedAt = "setup-kast:${context.version}"
-platform = "linux-x64"
-components = ["cli", "headless-backend", "config"]
-managedPaths = ["bin", "lib", "idea", "plugins", "kast-runtime-manifest.json"]
-shellRcPatches = []
-repos = []
-schemaVersion = 3
-
-[[install.backends]]
-name = "headless"
-version = ${tomlString(normalizeVersion(context.version))}
-installDir = ${tomlString(current)}
-runtimeLibsDir = ${tomlString(runtimeLibs)}
-ideaHome = ${tomlString(ideaHome)}
-`;
-    await (0, promises_1.writeFile)(configPath, content, "utf8");
-}
-function kastConfigPath(context) {
-    return (0, node_path_1.join)(context.configHome, "config.toml");
-}
-function kastInstallManifestPath(context) {
-    return (0, node_path_1.join)(context.installDir, "install.json");
-}
-async function writeKastInstallManifest(context, current, previous) {
-    const manifestPath = kastInstallManifestPath(context);
-    await (0, promises_1.mkdir)((0, node_path_1.dirname)(manifestPath), { recursive: true });
-    const now = currentTimestamp();
-    const normalizedVersion = normalizeVersion(context.version);
-    const runtimeLibs = (0, node_path_1.join)(current, "lib", "runtime-libs");
-    const ideaHome = (0, node_path_1.join)(current, "idea");
-    const activeBinary = (0, node_path_1.join)(current, "bin", "kast");
-    const previousVersion = previousActiveVersion(previous, normalizedVersion);
-    const manifest = {
-        tool: "kast",
-        installId: `setup-kast-linux-x64-${normalizedVersion}`,
-        profile: "setup-kast-headless",
-        activeVersion: context.version,
-        ...(previousVersion ? { previousVersion } : {}),
-        createdAt: previousCreatedAt(previous) || now,
-        updatedAt: now,
-        roots: {
-            install: context.installDir,
-            bin: (0, node_path_1.join)(current, "bin"),
-            config: context.configHome,
-            data: (0, node_path_1.join)(context.installDir, "state"),
-            cache: context.cacheHome,
-            runtime: (0, node_path_1.join)(context.installDir, "runtime"),
-            logs: (0, node_path_1.join)(context.cacheHome, "logs"),
-            locks: (0, node_path_1.join)(context.installDir, "locks"),
-        },
-        entrypoints: {
-            shim: activeBinary,
-            activeBinary,
-        },
-        schemas: {
-            manifest: 1,
-            workspaceRegistry: 1,
-            symbolIndex: 3,
-        },
-        version: normalizedVersion,
-        backendVersion: normalizedVersion,
-        installedAt: `setup-kast:${context.version}`,
-        platform: "linux-x64",
-        components: ["cli", "headless-backend", "config", "manifest"],
-        backends: [
-            {
-                name: "headless",
-                version: normalizedVersion,
-                installDir: current,
-                runtimeLibsDir: runtimeLibs,
-                ideaHome,
-            },
-        ],
-        managedPaths: [],
-        ownedPaths: [
-            context.installDir,
-            current,
-            context.configHome,
-            context.cacheHome,
-        ],
-        shellRcPatches: [],
-        repos: [],
-        schemaVersion: 3,
-    };
-    await (0, promises_1.writeFile)(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
-}
-function currentTimestamp() {
-    return `unix:${Math.floor(Date.now() / 1000)}`;
-}
-function previousActiveVersion(previous, normalizedVersion) {
-    const payload = previousJson(previous);
-    if (!payload)
-        return undefined;
-    const activeVersion = stringProperty(payload, "activeVersion");
-    if (!activeVersion || normalizeVersion(activeVersion) === normalizedVersion)
-        return undefined;
-    return activeVersion;
-}
-function previousCreatedAt(previous) {
-    const payload = previousJson(previous);
-    return payload ? stringProperty(payload, "createdAt") : undefined;
-}
-function previousJson(previous) {
-    if (!previous.exists)
-        return undefined;
-    try {
-        const payload = JSON.parse(previous.content);
-        return isRecord(payload) ? payload : undefined;
-    }
-    catch {
-        return undefined;
-    }
-}
-function stringProperty(payload, key) {
-    const value = payload[key];
-    return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-async function readOptionalTextFile(path) {
-    try {
-        return { exists: true, content: await (0, promises_1.readFile)(path, "utf8") };
-    }
-    catch {
-        return { exists: false, content: "" };
-    }
-}
-async function restoreTextFile(path, previous) {
-    if (previous.exists) {
-        await (0, promises_1.mkdir)((0, node_path_1.dirname)(path), { recursive: true });
-        await (0, promises_1.writeFile)(path, previous.content, "utf8");
-    }
-    else {
-        await (0, promises_1.rm)(path, { force: true });
-    }
-}
-async function readCurrentSymlink(path) {
-    try {
-        const stats = await (0, promises_1.lstat)(path);
-        if (!stats.isSymbolicLink()) {
-            throw new Error(`current install path exists but is not a symlink: ${path}`);
-        }
-        return { exists: true, target: await (0, promises_1.readlink)(path) };
-    }
-    catch (error) {
-        if (error.code === "ENOENT") {
-            return { exists: false };
-        }
-        throw error;
-    }
-}
-async function restoreCurrentSymlink(path, previous) {
-    if (previous.exists) {
-        await installSymlink(previous.target, path);
-    }
-    else {
-        await removeManagedPath(path);
-    }
-}
 async function installTree(source, target) {
     if (await canWriteManagedPath((0, node_path_1.dirname)(target))) {
         await makeWritable(target).catch(() => undefined);
@@ -698,72 +299,6 @@ async function installTree(source, target) {
     await execFileAsync("sudo", ["rm", "-rf", target]);
     await execFileAsync("sudo", ["mkdir", "-p", (0, node_path_1.dirname)(target)]);
     await execFileAsync("sudo", ["cp", "-a", source, target]);
-}
-async function replaceManagedPath(source, target) {
-    const parent = (0, node_path_1.dirname)(target);
-    const backup = (0, node_path_1.join)(parent, `.setup-kast-backup-${process.pid}-${Date.now()}`);
-    const targetExists = await pathExists(target);
-    if (await canWriteManagedPath(parent)) {
-        await (0, promises_1.rm)(backup, { recursive: true, force: true });
-        let backupCreated = false;
-        if (targetExists) {
-            await makeWritable(target).catch(() => undefined);
-            await (0, promises_1.rename)(target, backup);
-            backupCreated = true;
-        }
-        try {
-            await (0, promises_1.rename)(source, target);
-        }
-        catch (error) {
-            if (backupCreated) {
-                await (0, promises_1.rm)(target, { recursive: true, force: true }).catch(() => undefined);
-                await (0, promises_1.rename)(backup, target).catch((restoreError) => {
-                    warn(`failed to restore previous install ${target}: ${messageOf(restoreError)}`);
-                });
-            }
-            throw error;
-        }
-        if (backupCreated) {
-            await makeWritable(backup).catch(() => undefined);
-            await (0, promises_1.rm)(backup, { recursive: true, force: true }).catch((cleanupError) => {
-                warn(`failed to remove previous install backup ${backup}: ${messageOf(cleanupError)}`);
-            });
-        }
-        return;
-    }
-    await requireSudo();
-    await execFileAsync("sudo", ["mkdir", "-p", parent]);
-    await execFileAsync("sudo", ["rm", "-rf", backup]);
-    let backupCreated = false;
-    if (targetExists) {
-        await execFileAsync("sudo", ["mv", target, backup]);
-        backupCreated = true;
-    }
-    try {
-        await execFileAsync("sudo", ["mv", source, target]);
-    }
-    catch (error) {
-        if (backupCreated) {
-            await execFileAsync("sudo", ["rm", "-rf", target]).catch(() => undefined);
-            await execFileAsync("sudo", ["mv", backup, target]).catch((restoreError) => {
-                warn(`failed to restore previous install ${target}: ${messageOf(restoreError)}`);
-            });
-        }
-        throw error;
-    }
-    if (backupCreated) {
-        await execFileAsync("sudo", ["rm", "-rf", backup]).catch((cleanupError) => {
-            warn(`failed to remove previous install backup ${backup}: ${messageOf(cleanupError)}`);
-        });
-    }
-}
-async function removeManagedPath(target) {
-    if (await canWriteManagedPath((0, node_path_1.dirname)(target))) {
-        await (0, promises_1.rm)(target, { force: true, recursive: true });
-        return;
-    }
-    await requireSudo();
-    await execFileAsync("sudo", ["rm", "-rf", target]);
 }
 async function makeReadOnly(target) {
     if (await pathExists(target)) {
@@ -789,17 +324,6 @@ async function pathExists(target) {
         return false;
     }
 }
-async function installSymlink(target, linkPath) {
-    if (await canWriteManagedPath((0, node_path_1.dirname)(linkPath))) {
-        await (0, promises_1.rm)(linkPath, { force: true, recursive: true });
-        await (0, promises_1.symlink)(target, linkPath);
-        return;
-    }
-    await requireSudo();
-    await execFileAsync("sudo", ["rm", "-rf", linkPath]);
-    await execFileAsync("sudo", ["mkdir", "-p", (0, node_path_1.dirname)(linkPath)]);
-    await execFileAsync("sudo", ["ln", "-s", target, linkPath]);
-}
 async function canWriteManagedPath(directory) {
     try {
         await (0, promises_1.mkdir)(directory, { recursive: true });
@@ -820,36 +344,13 @@ async function requireSudo() {
         throw new Error("install-dir is not writable and passwordless sudo is unavailable");
     }
 }
-function tomlString(value) {
-    return JSON.stringify(value);
-}
 async function exportEnvironment(context, current) {
     await (0, promises_1.mkdir)(context.cacheHome, { recursive: true });
     await appendGithubPath((0, node_path_1.join)(current, "bin"));
     await appendGithubEnv("KAST_INSTALL_ROOT", context.installDir);
-    await appendGithubEnv("KAST_HOME", current);
+    await appendGithubEnv("KAST_HOME", context.installDir);
     await appendGithubEnv("KAST_CACHE_HOME", context.cacheHome);
     await appendGithubEnv("KAST_CONFIG_HOME", context.configHome);
-}
-async function runKastChecks(context, current) {
-    const env = {
-        ...process.env,
-        PATH: `${(0, node_path_1.join)(current, "bin")}:${process.env.PATH || ""}`,
-        KAST_INSTALL_ROOT: context.installDir,
-        KAST_HOME: current,
-        KAST_CACHE_HOME: context.cacheHome,
-        KAST_CONFIG_HOME: context.configHome,
-    };
-    await execFileAsync((0, node_path_1.join)(current, "bin", "kast"), ["--version"], { env });
-    try {
-        await execFileAsync((0, node_path_1.join)(current, "bin", "kast"), ["doctor"], { env });
-    }
-    catch (error) {
-        if (context.strict) {
-            throw error;
-        }
-        warn(`kast doctor failed: ${messageOf(error)}`);
-    }
 }
 async function download(source, destination, context, options) {
     let lastError;
