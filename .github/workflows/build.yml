@@ -5,36 +5,22 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Ensure zstd is available
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v zstd >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends zstd
-          fi
-
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
       - run: npm ci
       - run: npm run lint
       - run: npm test
-      - run: npm run test:fixtures
-      - run: npm run build
-
-      - name: Check dist/ is up to date
-        run: |
-          if [[ -n "$(git status --porcelain dist/)" ]]; then
-            echo "::error::dist/ is not up to date. Run 'npm run build' and commit."
-            git diff dist/
-            exit 1
-          fi
+      - run: mise exec -- uv run --locked ruff format --check .
+      - run: mise exec -- uv run --locked ruff check .
+      - run: mise exec -- uv run --locked pyright
+      - run: mise exec -- uv run --locked pytest -q
+      - run: mise exec -- uv run --locked --script bin/install-kast --help
+      - name: Examine generated action entry
+        run: git diff --exit-code -- dist/index.js

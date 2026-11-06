@@ -1,0 +1,13 @@
+# Replace COMMIT_SHA, the artifact URL, and BUNDLE_SHA256 before use.
+initialize:
+  - name: Install Python
+    uses: github.com/actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+    with:
+      python-version: '3.12'
+  - name: Install Kast
+    uses: github.com/amichne/kast-action@COMMIT_SHA
+    with:
+      version: '0.0.0'
+      artifact-url: https://ARTIFACT_HOST/kast-composed-setup.tar.gz
+      artifact-sha256: BUNDLE_SHA256
+      install-dir: /opt/kast
