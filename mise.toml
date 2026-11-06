@@ -1,0 +1,7 @@
+[tools]
+uv = "0.12.9"
+python = "3.12.14"
+node = "24.21.0"
+
+[env]
+_.path = ["{{config_root}}/bin"]

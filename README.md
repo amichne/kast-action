@@ -1,15 +1,134 @@
-# kast-action (Deprecated)
+# Setup Kast
 
-This action is deprecated and is not tested with current Kast releases.
-Existing tags remain available for historical consumers.
+This action installs a digest-pinned composed Kast distribution on Linux x86_64.
+The distribution contains the selected IntelliJ modules, Kotlin analysis, Gradle import, bundled JBR, Host, and Control.
+The action delegates installation to Kast's bundled installer.
+It adds the private `kast` wrapper to `PATH` for later steps.
 
-Install or update Kast with the supported installer:
+This revision replaces the retired daemon-based action.
+Historical tags keep their original behavior.
+The new contract needs an explicit composed bundle URL, SHA-256 digest, and numeric version.
+A released composed bundle is not yet available.
+Use a qualified local bundle or an authenticated artifact URL until release publication.
 
-```console
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/amichne/kast/main/install.sh)"
+## GitHub Actions
+
+The runner needs Linux x86_64, Python 3.12 or 3.13, and a writable, new installation root.
+The bundle includes Java and the native Kast components.
+The action does not need an existing IntelliJ installation.
+
+```yaml
+steps:
+  - uses: actions/checkout@v5
+  - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+    with:
+      python-version: '3.12'
+  - uses: amichne/kast-action@COMMIT_SHA
+    with:
+      version: '0.0.0'
+      artifact-url: ${{ vars.KAST_COMPOSED_BUNDLE_URL }}
+      artifact-sha256: ${{ vars.KAST_COMPOSED_BUNDLE_SHA256 }}
+      install-dir: /opt/kast
+      trust-workspace: ${{ github.workspace }}
+  - run: kast --version
 ```
 
-The installer verifies the release, delegates persistent setup to `_kastctl`,
-and installs the selected Codex, Claude, or Copilot resources without a remote
-marketplace. See the
-[Kast installation guide](https://kast.michne.com/how-to/install-or-update/).
+Replace `COMMIT_SHA` with the reviewed immutable action revision.
+Choose a root that the runner user can create without `sudo`.
+Keep the root short because the native Host uses Unix sockets.
+An existing installation rejects without replacement.
+For an upgrade, install into another short root and explicitly select that wrapper.
+
+## Devin environment blueprint
+
+Devin supports Node actions in the `initialize` phase.
+Its action reference needs the `github.com/` prefix and an explicit revision.
+See the [Devin blueprint reference](https://docs.devin.ai/onboard-devin/environment/blueprint-reference).
+
+```yaml
+initialize:
+  - name: Install Python
+    uses: github.com/actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+    with:
+      python-version: '3.12'
+  - name: Install Kast
+    uses: github.com/amichne/kast-action@COMMIT_SHA
+    with:
+      version: '0.0.0'
+      artifact-url: https://ARTIFACT_HOST/kast-composed-setup.tar.gz
+      artifact-sha256: BUNDLE_SHA256
+      install-dir: /opt/kast
+```
+
+Replace the action revision, artifact URL, and digest with the qualified inputs.
+Devin snapshots the installed files after `initialize`.
+Devin propagates the action's `GITHUB_PATH` and `GITHUB_ENV` additions to later steps.
+The action exports only its wrapper directory and `KAST_INSTALL_ROOT`.
+It does not change the session's `HOME` or `JAVA_HOME`.
+
+The example leaves workspace trust unset because a repository can arrive after the snapshot phase.
+After the repository exists, use the standalone installer with `--trust-workspace` and a new root for repository-specific setup.
+Trust applies only to the named repository in that installation's private IntelliJ profile.
+Repository trust permits Gradle build code to run.
+A version response does not establish semantic readiness.
+
+## Standalone Linux installation
+
+The same maintained Python bootstrap works outside an action runner.
+From a reviewed checkout of this repository, run:
+
+```sh
+bin/install-kast \
+  --version 0.0.0 \
+  --artifact-url file:///tmp/kast-composed-setup.tar.gz \
+  --artifact-sha256 BUNDLE_SHA256 \
+  --install-dir /opt/kast \
+  --trust-workspace /path/to/repository
+/opt/kast/bin/kast --version
+```
+
+Python 3.12 or 3.13 is necessary.
+The bootstrap has no third-party Python dependencies.
+For the pinned development procedure, use `mise exec -- uv run --locked --script bin/install-kast --help`.
+Outside Actions, select the wrapper by its absolute path or add its directory to `PATH`.
+
+## Inputs and results
+
+| Input | Meaning |
+| --- | --- |
+| `version` | Exact numeric Kast version, without a `v` prefix. |
+| `artifact-url` | HTTPS, HTTP, or local file URL for a `KAST_COMPOSED_SETUP_V1` bundle. |
+| `artifact-sha256` | SHA-256 digest of the complete archive. |
+| `install-dir` | New canonical root. The default is `/opt/kast`. |
+| `trust-workspace` | Optional existing canonical repository root that the caller explicitly trusts. |
+| `authorization-header` | Optional authorization value for the artifact origin. Redirects to another origin lose this header. |
+| `download-timeout-ms` | Download timeout from 1,000 through 1,800,000 milliseconds. The default is 600,000. |
+
+The action emits `kast-command` and `install-root` outputs.
+Its JSON result marks semantic readiness as `NOT_RUN`.
+Installation checks the native version command but does not start the Host.
+The first semantic request starts the Host and imports the selected repository.
+Use a real compiler query to establish semantic readiness for the workspace.
+
+The installer authenticates the archive before it extracts bootstrap code.
+The bundled installer then authenticates the archive again and examines every recorded runtime file.
+Changed bytes, unsafe archive paths, unsupported hosts, retired inputs, and existing destinations reject.
+The original donor digest remains separate from the composed bundle digest in the installation receipts.
+
+## Development and evidence
+
+```sh
+mise exec -- npm ci
+mise exec -- npm run lint
+mise exec -- npm test
+mise exec -- uv run --locked ruff check .
+mise exec -- uv run --locked ruff format --check .
+mise exec -- uv run --locked pyright
+mise exec -- uv run --locked pytest -q
+```
+
+Commit `dist/index.js` after a TypeScript change.
+The Python cases exercise admission, authenticated bootstrap dispatch, rejection, exports, and authorization routing.
+Their fake bundle does not prove native Host behavior.
+Kast's [Linux composition report](https://github.com/amichne/kast/blob/feature/linux-composed-host/docs/reviews/linux-composed-install.md) records the separate native corpus.
+No live Devin machine result exists in this revision.
