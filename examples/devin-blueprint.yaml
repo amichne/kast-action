@@ -1,13 +1,24 @@
-# Replace COMMIT_SHA, the artifact URL, and BUNDLE_SHA256 before use.
+# Replace the version (in both phases), artifact URL, and BUNDLE_SHA256 before use.
 initialize:
   - name: Install Python
     uses: github.com/actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
     with:
       python-version: '3.12'
   - name: Install Kast
-    uses: github.com/amichne/kast-action@COMMIT_SHA
+    uses: github.com/amichne/kast-action@8367b18717ff6b016df8acd815f55ce77e7a28e5
     with:
       version: '0.0.0'
-      artifact-url: https://ARTIFACT_HOST/kast-composed-setup.tar.gz
+      artifact-url: https://ARTIFACT_HOST/kast-composed-setup-v0.0.0-linux-x86_64.tar.gz
       artifact-sha256: BUNDLE_SHA256
       install-dir: /opt/kast
+
+# Runs on full and differential builds; inherited snapshots skip initialize.
+maintenance: |
+  set -eu
+  test -f /opt/kast/.kast-headless-owned
+  test -x /opt/kast/bin/kast
+  kast_version=$(/opt/kast/bin/kast --version)
+  test "$kast_version" = '0.0.0'
+  printf '%s\n' \
+    'export KAST_INSTALL_ROOT=/opt/kast' \
+    'export PATH="/opt/kast/bin:$PATH"' >> "${ENVRC:?Devin must provide ENVRC}"
