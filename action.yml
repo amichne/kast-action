@@ -1,5 +1,5 @@
 name: Setup Kast
-description: Install a digest-pinned composed Kast distribution on Linux x86_64
+description: Install a digest-pinned isolated Kast runtime on Linux x86_64
 author: amichne
 
 inputs:
@@ -7,20 +7,17 @@ inputs:
     description: Exact numeric Kast component version in the setup bundle
     required: true
   artifact-url:
-    description: HTTPS or file URL for a KAST_COMPOSED_SETUP_V1 tar.gz bundle
+    description: URL for a complete Kast Linux x86_64 tar.gz archive
     required: true
   artifact-sha256:
-    description: SHA-256 digest of the complete setup bundle
+    description: SHA-256 digest of the complete archive
     required: true
   install-dir:
     description: New canonical installation root with a short path for Unix sockets
     required: false
     default: /opt/kast
-  trust-workspace:
-    description: Optional exact repository root whose build code the caller explicitly trusts
-    required: false
   authorization-header:
-    description: Optional Authorization header for the artifact origin
+    description: Optional Authorization header for the HTTPS artifact origin
     required: false
   download-timeout-ms:
     description: Timeout for the artifact download in milliseconds
@@ -30,6 +27,8 @@ inputs:
 outputs:
   kast-command:
     description: Installed Kast wrapper with its private Host profile
+  kast-task-command:
+    description: Installed command that grants trust for the exact task workspace
   install-root:
     description: Owned installation root
 

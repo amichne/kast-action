@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --check dist/index.js",
+    "test": "npm run build && node --test tests/index.test.cjs",
     "test:fixtures": "mise exec -- uv run --locked pytest"
   },
   "devDependencies": {

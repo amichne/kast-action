@@ -30,22 +30,14 @@ INPUT_NAMES = (
     "install-dir",
     "authorization-header",
     "download-timeout-ms",
-    "trust-workspace",
 )
 
-BOOTSTRAP_FILES = frozenset(
-    {
-        "setup-kast/bin/setup-kast",
-        "setup-kast/packaging/composed_bundle.py",
-        "setup-kast/packaging/managed_headless.py",
-    }
-)
+BOOTSTRAP_MEMBER = "setup-kast/bin/setup-kast.pyz"
 
 
 class Failure(StrEnum):
     INVALID_INPUT = "INVALID_INPUT"
     UNSUPPORTED_PLATFORM = "UNSUPPORTED_PLATFORM"
-    EXISTING_INSTALLATION = "EXISTING_INSTALLATION"
     DOWNLOAD_FAILED = "DOWNLOAD_FAILED"
     CHECKSUM_MISMATCH = "CHECKSUM_MISMATCH"
     UNSAFE_BOOTSTRAP = "UNSAFE_BOOTSTRAP"
@@ -58,6 +50,7 @@ class Failure(StrEnum):
 class Rejected:
     reason: Failure
     stage: str
+    exitCode: int = 1
     type: Literal["rejected"] = field(default="rejected", init=False)
 
 
@@ -69,7 +62,6 @@ class _AdmittedSetup:
     version: str
     authorization: str
     timeout: int
-    trust_workspace: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +73,7 @@ class _AuthenticatedArchive:
 @dataclass(frozen=True, slots=True)
 class SetupInstalled:
     command: str
+    taskCommand: str
     root: str
     version: str
     bundleSha256: str
@@ -110,29 +103,12 @@ def admission(values: Mapping[str, str]) -> _AdmittedSetup | Rejected:
         return Rejected(Failure.INVALID_INPUT, "artifact URL")
     root = Path(values.get("install-dir", "/opt/kast"))
     timeout = values.get("download-timeout-ms", "600000")
-    if (
-        not root.is_absolute()
-        or root.resolve() != root
-        or not timeout.isdecimal()
-        or not 1000 <= int(timeout) <= 1_800_000
-    ):
+    if not root.is_absolute() or not timeout.isdecimal() or not 1000 <= int(timeout) <= 1_800_000:
         return Rejected(Failure.INVALID_INPUT, "destination or timeout")
-    # Native lifecycle sockets need a short, canonical destination.
-    socket = root / "state/home/.kast/ide-lifecycle" / ("0" * 32) / "host.sock"
-    if len(os.fsencode(socket)) > 100:
-        return Rejected(Failure.INVALID_INPUT, "destination exceeds socket limit")
-    trust_raw = values.get("trust-workspace", "")
-    trust = Path(trust_raw) if trust_raw else None
-    if trust is not None and (
-        trust.resolve() != trust
-        or not trust.is_dir()
-        or root.is_relative_to(trust)
-        or trust.is_relative_to(root)
-    ):
-        return Rejected(Failure.INVALID_INPUT, "trusted workspace")
-    return _AdmittedSetup(
-        url, digest, root, version, values.get("authorization-header", ""), int(timeout), trust
-    )
+    authorization = values.get("authorization-header", "")
+    if authorization and parsed.scheme != "https":
+        return Rejected(Failure.INVALID_INPUT, "authorization needs HTTPS")
+    return _AdmittedSetup(url, digest, root, version, authorization, int(timeout))
 
 
 class OriginRedirect(urllib.request.HTTPRedirectHandler):
@@ -155,7 +131,7 @@ class OriginRedirect(urllib.request.HTTPRedirectHandler):
 
 def download(inputs: _AdmittedSetup, target: Path) -> _AuthenticatedArchive | Rejected:
     request = urllib.request.Request(inputs.url)
-    if inputs.authorization and urllib.parse.urlsplit(inputs.url).scheme in {"https", "http"}:
+    if inputs.authorization:
         request.add_header("Authorization", inputs.authorization)
     try:
         opener = urllib.request.build_opener(OriginRedirect())
@@ -175,36 +151,35 @@ def download(inputs: _AdmittedSetup, target: Path) -> _AuthenticatedArchive | Re
 
 
 def bootstrap(archive: _AuthenticatedArchive, directory: Path) -> Path | Rejected:
-    found: set[str] = set()
+    entry = directory / "setup-kast.pyz"
     try:
-        with tarfile.open(archive.path, "r:*") as incoming:
+        with tarfile.open(archive.path, "r|gz") as incoming:
             for member in incoming:
-                if member.name not in BOOTSTRAP_FILES:
+                if member.name != BOOTSTRAP_MEMBER:
                     continue
-                if not member.isfile() or member.name in found or member.size > 1_048_576:
+                if entry.exists() or not member.isfile() or not 0 < member.size <= 1_048_576:
                     return Rejected(Failure.UNSAFE_BOOTSTRAP, "bundle entry")
-                incoming.extract(member, directory, filter="data")
-                found.add(member.name)
-                if frozenset(found) == BOOTSTRAP_FILES:
-                    break
-    except (OSError, tarfile.TarError):
+                source = incoming.extractfile(member)
+                if source is None:
+                    return Rejected(Failure.UNSAFE_BOOTSTRAP, "bundle entry")
+                with source, entry.open("xb") as out:
+                    shutil.copyfileobj(source, out)
+    except (OSError, EOFError, tarfile.TarError):
         return Rejected(Failure.UNSAFE_BOOTSTRAP, "bundle archive")
-    if frozenset(found) != BOOTSTRAP_FILES:
-        return Rejected(Failure.UNSAFE_BOOTSTRAP, "missing modern bundle installer")
-    return directory / "setup-kast/bin/setup-kast"
+    if not entry.exists():
+        return Rejected(Failure.UNSAFE_BOOTSTRAP, "missing bundle installer")
+    return entry
 
 
 def install(inputs: _AdmittedSetup) -> SetupInstalled | Rejected:
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         return Rejected(Failure.UNSUPPORTED_PLATFORM, "host")
-    if inputs.root.exists():
-        return Rejected(Failure.EXISTING_INSTALLATION, "destination")
     with tempfile.TemporaryDirectory(prefix="setup-kast-") as temporary:
         scratch = Path(temporary).resolve()
         artifact = download(inputs, scratch / "bundle.tar.gz")
         if isinstance(artifact, Rejected):
             return artifact
-        entry = bootstrap(artifact, scratch / "bootstrap")
+        entry = bootstrap(artifact, scratch)
         if isinstance(entry, Rejected):
             return entry
         child_environment = {
@@ -212,52 +187,63 @@ def install(inputs: _AdmittedSetup) -> SetupInstalled | Rejected:
             "HOME": os.environ.get("HOME", str(scratch)),
             "TMPDIR": str(scratch),
         }
-        arguments = [
-            sys.executable,
-            str(entry),
-            "--root",
-            str(inputs.root),
-            "--version",
-            inputs.version,
-            "--archive",
-            str(artifact.path),
-            "--archive-sha256",
-            artifact.sha256,
-        ]
-        if inputs.trust_workspace is not None:
-            arguments.extend(("--trust-workspace", str(inputs.trust_workspace)))
         installed = subprocess.run(
-            arguments,
+            [
+                sys.executable,
+                str(entry),
+                "--root",
+                str(inputs.root),
+                "--version",
+                inputs.version,
+                "--archive",
+                str(artifact.path),
+                "--archive-sha256",
+                artifact.sha256,
+            ],
             env=child_environment,
             capture_output=True,
             timeout=1800,
             check=False,
         )
         if installed.returncode != 0:
-            if installed.stdout:
-                print(installed.stdout.decode(errors="replace"), file=sys.stderr)
-            return Rejected(Failure.INSTALLER_FAILED, "shared Kast installer")
-    command = inputs.root / "bin/kast"
-    if (
-        not command.is_file()
-        or command.is_symlink()
-        or not os.access(command, os.X_OK)
-        or not (inputs.root / ".kast-headless-owned").is_file()
-    ):
-        return Rejected(Failure.INSTALLED_COMMAND_REJECTED, "installed wrapper")
-    version = subprocess.run(
-        [str(command), "--version"], capture_output=True, timeout=60, check=False
-    )
-    if version.returncode != 0 or version.stdout.decode().strip() != inputs.version:
-        return Rejected(Failure.INSTALLED_COMMAND_REJECTED, "installed version")
-    return SetupInstalled(str(command), str(inputs.root), inputs.version, artifact.sha256)
+            for message in (installed.stdout, installed.stderr):
+                if message:
+                    print(message.decode(errors="replace"), file=sys.stderr, end="")
+            status = (
+                installed.returncode if installed.returncode > 0 else 128 - installed.returncode
+            )
+            return Rejected(Failure.INSTALLER_FAILED, "shared Kast installer", status)
+        command = inputs.root / "bin/kast"
+        task = inputs.root / "bin/kast-task"
+        for executable in (command, task):
+            if (
+                not executable.is_file()
+                or executable.is_symlink()
+                or not os.access(executable, os.X_OK)
+            ):
+                return Rejected(Failure.INSTALLED_COMMAND_REJECTED, executable.name)
+        version = subprocess.run(
+            [str(command), "--version"],
+            env=child_environment,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if version.returncode != 0 or version.stdout.decode().strip() != inputs.version:
+            return Rejected(Failure.INSTALLED_COMMAND_REJECTED, "installed version")
+        return SetupInstalled(
+            str(command), str(task), str(inputs.root), inputs.version, artifact.sha256
+        )
 
 
 def export_github(result: SetupInstalled, environment: Mapping[str, str]) -> None:
     entries = {
         "GITHUB_PATH": str(Path(result.command).parent) + "\n",
         "GITHUB_ENV": "KAST_INSTALL_ROOT=" + result.root + "\n",
-        "GITHUB_OUTPUT": "kast-command=" + result.command + "\ninstall-root=" + result.root + "\n",
+        "GITHUB_OUTPUT": (
+            f"kast-command={result.command}\nkast-task-command={result.taskCommand}\n"
+            f"install-root={result.root}\n"
+        ),
     }
     for key, content in entries.items():
         path = environment.get(key)
@@ -295,7 +281,7 @@ def main() -> int:
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         result = Rejected(Failure.EFFECT_FAILED, type(error).__name__)
     print(json.dumps(asdict(result), indent=2))
-    return 0 if isinstance(result, SetupInstalled) else 1
+    return result.exitCode if isinstance(result, Rejected) else 0
 
 
 if __name__ == "__main__":

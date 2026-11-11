@@ -1,22 +1,23 @@
-# Replace the version (in both phases), artifact URL, and BUNDLE_SHA256 before use.
+# Replace ACTION_COMMIT_SHA, both versions, the artifact URL, and BUNDLE_SHA256.
 initialize:
-  - name: Install Python
-    uses: github.com/actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
-    with:
-      python-version: '3.12'
-  - name: Install Kast
-    uses: github.com/amichne/kast-action@8367b18717ff6b016df8acd815f55ce77e7a28e5
+  - name: Install Kast with system Python
+    uses: github.com/amichne/kast-action@ACTION_COMMIT_SHA
     with:
       version: '0.0.0'
       artifact-url: https://ARTIFACT_HOST/kast-composed-setup-v0.0.0-linux-x86_64.tar.gz
       artifact-sha256: BUNDLE_SHA256
       install-dir: /opt/kast
 
-# Runs on full and differential builds; inherited snapshots skip initialize.
+knowledge:
+  - name: Kast task workspace
+    contents: |
+      Run each Kast command through kast-task from the root of the actual checkout.
+      Use kast-task "$(pwd -P)" -- kast followed by the required Kast arguments.
+
+# Full and differential builds run maintenance. Inherited snapshots skip initialize.
 maintenance: |
   set -eu
-  test -f /opt/kast/.kast-headless-owned
-  test -x /opt/kast/bin/kast
+  test -x /opt/kast/bin/kast-task
   kast_version=$(/opt/kast/bin/kast --version)
   test "$kast_version" = '0.0.0'
   printf '%s\n' \
