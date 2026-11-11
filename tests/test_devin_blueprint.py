@@ -20,10 +20,12 @@ def maintenance(root: Path) -> str:
 
 def wrapper(root: Path, *, version: str = "0.0.0", exit_code: int = 0) -> Path:
     (root / "bin").mkdir(parents=True)
-    _ = (root / ".kast-headless-owned").write_text("fixture only")
     command = root / "bin/kast"
     _ = command.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\nexit {exit_code}\n")
     command.chmod(0o700)
+    task = root / "bin/kast-task"
+    _ = task.write_text("#!/bin/sh\nexit 42\n")
+    task.chmod(0o700)
     return command
 
 
@@ -56,7 +58,7 @@ def test_inherited_snapshot_restores_discovery_after_each_envrc_reset(tmp_path: 
             [
                 "/bin/bash",
                 "-c",
-                '. "$ENVRC"; command -v kast; kast --version; '
+                '. "$ENVRC"; command -v kast; command -v kast-task; kast --version; '
                 'printf "%s\\n" "$KAST_INSTALL_ROOT" "$PATH" "$EXISTING" "$HOME" "$JAVA_HOME"',
             ],
             env=environment,
@@ -67,6 +69,7 @@ def test_inherited_snapshot_restores_discovery_after_each_envrc_reset(tmp_path: 
         assert session.returncode == 0, session.stderr
         assert session.stdout.splitlines() == [
             str(root / "bin/kast"),
+            str(root / "bin/kast-task"),
             "0.0.0",
             str(root),
             f"{root}/bin:/usr/bin:/bin",
@@ -75,14 +78,14 @@ def test_inherited_snapshot_restores_discovery_after_each_envrc_reset(tmp_path: 
             environment["JAVA_HOME"],
         ]
     assert sorted(path.relative_to(root).as_posix() for path in root.rglob("*")) == [
-        ".kast-headless-owned",
         "bin",
         "bin/kast",
+        "bin/kast-task",
     ]
 
 
 @pytest.mark.parametrize(
-    "state", ["missing", "unowned", "not-executable", "wrong-version", "failed"]
+    "state", ["missing", "missing-task", "not-executable", "wrong-version", "failed"]
 )
 def test_rejected_snapshot_does_not_export_or_replace_installation(
     tmp_path: Path, state: str
@@ -94,8 +97,8 @@ def test_rejected_snapshot_does_not_export_or_replace_installation(
             version="9.9.9" if state == "wrong-version" else "0.0.0",
             exit_code=1 if state == "failed" else 0,
         )
-        if state == "unowned":
-            (root / ".kast-headless-owned").unlink()
+        if state == "missing-task":
+            (root / "bin/kast-task").unlink()
         elif state == "not-executable":
             command.chmod(0o600)
     before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}

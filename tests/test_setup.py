@@ -2,9 +2,11 @@
 
 import hashlib
 import io
+import sys
 import tarfile
 import tempfile
 import urllib.request
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.client import HTTPMessage
@@ -16,19 +18,25 @@ import pytest
 import setup_kast as setup
 
 ENTRY = b"""import argparse
+import sys
 from pathlib import Path
 p = argparse.ArgumentParser()
 for name in ("root", "version", "archive", "archive-sha256"):
     p.add_argument("--" + name, required=True)
 a = p.parse_args()
+if a.version == "1.2.3":
+    raise SystemExit(37)
 root = Path(a.root)
 root.mkdir()
 (root / "bin").mkdir()
-(root / ".kast-headless-owned").write_text("fixture only")
 command = root / "bin/kast"
 command.write_text("#!/usr/bin/env python3\\nprint('" + a.version + "')\\n")
 command.chmod(0o700)
+task = root / "bin/kast-task"
+task.write_text("#!/bin/sh\\nexit 0\\n")
+task.chmod(0o700)
 (root / "received.txt").write_text(a.archive_sha256)
+(root / "interpreter.txt").write_text(sys.executable)
 """
 
 
@@ -51,26 +59,31 @@ def destination() -> Iterator[Path]:
         yield Path(temporary).resolve() / "i"
 
 
-def artifact(tmp_path: Path, *, unsafe: bool = False) -> Path:
+def artifact(tmp_path: Path, *, unsafe: str = "") -> Path:
     path = tmp_path / "bundle ; dollar$.tar.gz"
+    zipapp = io.BytesIO()
+    with zipfile.ZipFile(zipapp, "w") as source:
+        source.writestr("__main__.py", ENTRY)
+    member = "setup-kast/bin/setup-kast.pyz"
+    data = zipapp.getvalue()
     with tarfile.open(path, "w:gz") as out:
-        for name in sorted(setup.BOOTSTRAP_FILES):
-            info = tarfile.TarInfo(name)
-            raw = ENTRY if name.endswith("bin/setup-kast") else b"# transport fixture"
-            if unsafe and name.endswith("bin/setup-kast"):
-                info.type = tarfile.SYMTYPE
-                info.linkname = "../../outside"
-                out.addfile(info)
-            else:
-                info.size = len(raw)
-                out.addfile(info, io.BytesIO(raw))
+        info = tarfile.TarInfo(member if unsafe != "missing" else "setup-kast/bin/setup-kast")
+        if unsafe == "symlink":
+            info.type = tarfile.SYMTYPE
+            info.linkname = "../../outside"
+            out.addfile(info)
+        else:
+            info.size = len(data)
+            out.addfile(info, io.BytesIO(data))
+            if unsafe == "duplicate":
+                out.addfile(info, io.BytesIO(data))
     return path
 
 
-def inputs(path: Path, root: Path):
+def inputs(path: Path, root: Path, version: str = "0.0.0"):
     result = setup.admission(
         {
-            "version": "0.0.0",
+            "version": version,
             "artifact-url": path.as_uri(),
             "artifact-sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "install-dir": str(root),
@@ -91,6 +104,8 @@ def test_real_child_uses_current_bundle_entry_and_exports_only_installation_fact
     assert result.command == str(destination / "bin/kast")
     assert result.version == "0.0.0" and result.semanticReadiness == "NOT_RUN"
     assert (destination / "received.txt").read_text() == admitted.sha256
+    assert (destination / "interpreter.txt").read_text() == sys.executable
+    assert result.taskCommand == str(destination / "bin/kast-task")
     environment = {
         name: str(tmp_path / name) for name in ("GITHUB_PATH", "GITHUB_ENV", "GITHUB_OUTPUT")
     }
@@ -100,7 +115,11 @@ def test_real_child_uses_current_bundle_entry_and_exports_only_installation_fact
         Path(environment["GITHUB_ENV"]).read_text()
         == "KAST_INSTALL_ROOT=" + str(destination) + "\n"
     )
-    assert "kast-command=" + result.command in Path(environment["GITHUB_OUTPUT"]).read_text()
+    assert Path(environment["GITHUB_OUTPUT"]).read_text().splitlines() == [
+        "kast-command=" + result.command,
+        "kast-task-command=" + result.taskCommand,
+        "install-root=" + result.root,
+    ]
 
 
 def test_changed_archive_rejects_before_installer_effects(
@@ -116,35 +135,44 @@ def test_changed_archive_rejects_before_installer_effects(
     assert not destination.exists()
 
 
-def test_existing_destination_preserves_its_bytes_without_download(destination: Path) -> None:
+def test_existing_destination_rejects_through_the_installer(
+    tmp_path: Path, destination: Path
+) -> None:
     destination.mkdir()
     sentinel = destination / "foreign"
     _ = sentinel.write_bytes(b"preserve me")
-    admitted = setup.admission(
-        {
-            "version": "0.0.0",
-            "artifact-url": "https://invalid.example/never-requested",
-            "artifact-sha256": "a" * 64,
-            "install-dir": str(destination),
-        }
-    )
-    assert not isinstance(admitted, setup.Rejected)
-    with (
-        linux_observation(),
-        patch.object(setup, "download", side_effect=AssertionError("unexpected download")),
-    ):
-        assert setup.install(admitted) == setup.Rejected(
-            setup.Failure.EXISTING_INSTALLATION, "destination"
-        )
+    admitted = inputs(artifact(tmp_path), destination)
+    with linux_observation():
+        result = setup.install(admitted)
+    assert result == setup.Rejected(setup.Failure.INSTALLER_FAILED, "shared Kast installer")
+    assert list(destination.iterdir()) == [sentinel]
     assert sentinel.read_bytes() == b"preserve me"
 
 
-def test_bootstrap_symlink_rejects_without_activation(tmp_path: Path, destination: Path) -> None:
-    admitted = inputs(artifact(tmp_path, unsafe=True), destination)
+@pytest.mark.parametrize(
+    "unsafe,stage",
+    [
+        ("symlink", "bundle entry"),
+        ("duplicate", "bundle entry"),
+        ("missing", "missing bundle installer"),
+    ],
+)
+def test_invalid_zipapp_rejects_without_activation(
+    tmp_path: Path, destination: Path, unsafe: str, stage: str
+) -> None:
+    admitted = inputs(artifact(tmp_path, unsafe=unsafe), destination)
     with linux_observation():
-        assert setup.install(admitted) == setup.Rejected(
-            setup.Failure.UNSAFE_BOOTSTRAP, "bundle entry"
-        )
+        assert setup.install(admitted) == setup.Rejected(setup.Failure.UNSAFE_BOOTSTRAP, stage)
+    assert not destination.exists()
+
+
+def test_installer_exit_status_survives_dispatch(tmp_path: Path, destination: Path) -> None:
+    admitted = inputs(artifact(tmp_path), destination, version="1.2.3")
+    with linux_observation():
+        result = setup.install(admitted)
+    assert isinstance(result, setup.Rejected)
+    assert result.reason is setup.Failure.INSTALLER_FAILED
+    assert result.exitCode == 37
     assert not destination.exists()
 
 
@@ -170,8 +198,9 @@ def test_invalid_ingress_never_becomes_installation_input(field: str, value: str
     assert isinstance(setup.admission(values), setup.Rejected)
 
 
-def test_retired_input_rejects_instead_of_silently_skipping_its_behavior() -> None:
-    assert setup.admission({"gradle-ro-cache-url": "https://example.com/cache"}) == setup.Rejected(
+@pytest.mark.parametrize("field", ["gradle-ro-cache-url", "trust-workspace"])
+def test_retired_input_rejects(field: str) -> None:
+    assert setup.admission({field: "retired value"}) == setup.Rejected(
         setup.Failure.INVALID_INPUT,
         "unknown or retired input",
     )
